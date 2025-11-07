@@ -1,5 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+# 평면에 해당하는 가우시안을 output으로
 import numpy as np
 from pathlib import Path
 import open3d as o3d

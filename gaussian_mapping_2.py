@@ -1,3 +1,5 @@
+# 바닥에 해당하는 csv파일, 바닥 ply파일, 바닥이 아닌 ply파일
+
 import os, sys, glob, time
 import numpy as np
 import cv2
@@ -132,7 +134,8 @@ def main():
     cams   = rw.read_cameras_binary(os.path.join(SPARSE_DIR, "cameras.bin"))
     images = rw.read_images_binary( os.path.join(SPARSE_DIR, "images.bin"))
 
-    # per-image 뷰 준비(+마스크)
+    # 각 뷰의 카메라 파라미터, 마스크, 이미지 크기
+    # colmap에서 읽음
     mask_cache = {}
     views = []
     for idx, I in enumerate(sorted(images.values(), key=lambda x: x.id)):
@@ -169,14 +172,15 @@ def main():
         votes = []
         for (camd, R, t, m) in views:
             pr = project_point(X, R, t, camd)
-            if pr is None: continue
+            if pr is None: 
+                continue
             u,vp = pr
             if 0 <= vp < m.shape[0] and 0 <= u < m.shape[1]:
                 votes.append(1 if m[vp,u]>0 else 0)
         floor_prob[i] = np.mean(votes) if votes else 0.0
 
-    # 3) 저장
-    out_dir = os.path.dirname(GAUSS_PLY_IN) or "."
+    # 3) 저장 -> output/oseok4/floor_data 폴더에 저장
+    out_dir = os.path.join(args.gaussian, "floor_data")
     os.makedirs(out_dir, exist_ok=True)
 
     idxs = np.arange(N, dtype=int)
@@ -185,10 +189,28 @@ def main():
                delimiter=",", header="index,floor_prob", comments="", fmt=["%d","%.6f"])
     print(f"[SAVE] floor prob -> {prob_csv}")
 
-    mask_idx_path = os.path.join(out_dir, f"gaussian_floor_indices_thr{FLOOR_THR:.2f}.txt")
-    sel = np.where(floor_prob >= FLOOR_THR)[0]
-    np.savetxt(mask_idx_path, sel, fmt="%d")
-    print(f"[SAVE] floor indices (thr={FLOOR_THR}) -> {mask_idx_path}")
+    # 필요 없는 듯
+    # mask_idx_path = os.path.join(out_dir, f"gaussian_floor_indices_thr{FLOOR_THR:.2f}.txt")
+    # sel = np.where(floor_prob >= FLOOR_THR)[0]
+    # np.savetxt(mask_idx_path, sel, fmt="%d")
+    # print(f"[SAVE] floor indices (thr={FLOOR_THR}) -> {mask_idx_path}")
+
+    # 4) PLY 분할 저장
+    floor_idxs = np.where(floor_prob >= FLOOR_THR)[0]
+    nonfloor_idxs = np.where(floor_prob < FLOOR_THR)[0]
+
+    # 원본 PLY 로드
+    xyz, vtable, ply_full = read_xyz_and_vertex(GAUSS_PLY_IN)
+
+    v_floor = vtable[floor_idxs]
+    v_nonfloor = vtable[nonfloor_idxs]
+
+    floor_ply = os.path.join(out_dir, f"floor.ply")
+    nonfloor_ply = os.path.join(out_dir, f"nonfloor.ply")
+
+    write_subset(floor_ply, ply_full, v_floor)
+    write_subset(nonfloor_ply, ply_full, v_nonfloor)
+
 
 if __name__ == "__main__":
     main()
