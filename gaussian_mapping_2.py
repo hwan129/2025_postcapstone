@@ -5,6 +5,7 @@ import numpy as np
 import cv2
 import argparse
 from plyfile import PlyData, PlyElement
+from pathlib import Path
 
 import time
 
@@ -27,7 +28,7 @@ MASK_ROOT      = f"output/{colmap_folder}/masks"                   # 마스크 �
 GAUSS_PLY_IN   = os.path.join(args.gaussian, "point_cloud/iteration_30000/scene_point_cloud.ply")
 
 # 표결 파라미터
-FLOOR_THR        = 0.5    # floor_prob >= THR → 바닥으로 간주(마스크 목록 저장용)
+FLOOR_THR        = 0.4    # floor_prob >= THR → 바닥으로 간주(마스크 목록 저장용)
 # ==========================
 
 # ---- read_write_model.py 찾기 (COLMAP) ----
@@ -41,6 +42,7 @@ CANDIDATES = [
     os.path.abspath(os.path.join(script_dir, "..")),
     os.path.abspath(os.path.join(script_dir, "../..")),
 ]
+
 rw = None
 for d in CANDIDATES:
     p = os.path.join(d, "read_write_model.py")
@@ -128,6 +130,20 @@ def project_point(Xw, R, t, cam):
         return int(round(u)), int(round(v))
     return None
 
+def read_xyz_and_vertex(p):
+    ply = PlyData.read(p)
+    v = ply['vertex']
+    xyz = np.column_stack([v['x'], v['y'], v['z']]).astype(np.float32)
+    return xyz, v.data, ply
+
+def write_subset(path, ply_full, v_subset):
+    out = PlyData([PlyElement.describe(v_subset, 'vertex')],
+                  text=ply_full.text,
+                  byte_order=ply_full.byte_order)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    out.write(path.as_posix())
+
+
 # ---- 메인 함수 ----
 def main():
     # 0) COLMAP 모델/이미지 로드
@@ -208,8 +224,8 @@ def main():
     floor_ply = os.path.join(out_dir, f"floor.ply")
     nonfloor_ply = os.path.join(out_dir, f"nonfloor.ply")
 
-    write_subset(floor_ply, ply_full, v_floor)
-    write_subset(nonfloor_ply, ply_full, v_nonfloor)
+    write_subset(Path(floor_ply), ply_full, v_floor)
+    write_subset(Path(nonfloor_ply), ply_full, v_nonfloor)
 
 
 if __name__ == "__main__":
