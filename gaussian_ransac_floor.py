@@ -1,17 +1,22 @@
-# 바닥과 바닥이 아닌 부분을 따로 output, 추정된 평면
-
+# input : 평면만 있는 .ply, output : 추정된 평면의 촤표
 import numpy as np
 from pathlib import Path
 import open3d as o3d
 from plyfile import PlyData, PlyElement
+import argparse, os, sys
+from pathlib import Path
 
 import time
 
 start = time.perf_counter()
 
-CSV_PATH   = Path("../SegAnyGAussians/output/oseok4/point_cloud/iteration_30000/gaussian_floor_prob.csv")   # 네가 만든 CSV
-PLY_PATH   = Path("../SegAnyGAussians/output/oseok4/point_cloud/iteration_30000/scene_point_cloud.ply")     # 원본 가우시안 PLY
-OUT_DIR    = Path("output/gaussian")
+parser = argparse.ArgumentParser(description="평면 추정")
+parser.add_argument("-d", "--data", required=True, help="Gaussian Model")
+args = parser.parse_args()
+
+PLY_PATH   = os.path.join(args.data, "floor_data/floor.ply")
+OUT_DIR = Path(args.data) / "floor_data"
+
 THRESHOLD  = 0.5                                   # floor_prob 임계
 
 # RANSAC 파라미터 (네 코드와 동일/유사)
@@ -26,8 +31,7 @@ def _unit(v):
     n = np.linalg.norm(v); return v/n if n>0 else v
 
 def _angle_deg_to_axis(n, axis):
-    n = _unit(np.asarray(n,float)); 
-    axis = _unit(np.asarray(axis,float))
+    n = _unit(np.asarray(n,float)); axis = _unit(np.asarray(axis,float))
     c = float(np.clip(abs(np.dot(n, axis)), -1.0, 1.0))
     return float(np.degrees(np.arccos(c)))
 
@@ -65,31 +69,23 @@ def ransac_floor(xyz):
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     # 1) CSV에서 floor 인덱스 뽑기
-    arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
-    if arr.ndim == 1: arr = arr[None,:]
-    idx = arr[:,0].astype(int)
-    prob = arr[:,1].astype(float)
-    sel = idx[prob >= THRESHOLD]
+    # arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
+    # if arr.ndim == 1: arr = arr[None,:]
+    # idx = arr[:,0].astype(int); prob = arr[:,1].astype(float)
+    # sel = idx[prob >= THRESHOLD]
 
     # 2) PLY 로드 → floor 서브셋 만들기
     xyz, vtable, ply_full = read_xyz_and_vertex(PLY_PATH)
-    if sel.size == 0:
-        print("[WARN] no floor candidates at this threshold")
-        return
+    N = len(xyz)
+    print(f"[LOAD] floor.ply: {N} points")
 
-    # 3) RANSAC (floor-only 후보에 대해서 실행)
-    xyz_floor = xyz[sel]
-    inliers, model = ransac_floor(xyz_floor)
+    # 3) RANSAC (floor-only 후보에 대해서 실행 → 훨씬 빨라짐)
+    inliers, model = ransac_floor(xyz)
     if inliers is None or inliers.size == 0:
-        print("[WARN] RANSAC found no plane")
-        return
+        print("[WARN] RANSAC found no plane"); return
 
-    n = np.asarray(model[:3], float)
-    d = float(model[3])
-
-    if np.dot(n, UP_AXIS) < 0:
-        n = -n
-        d = -d
+    # 4) 평면 방정식 출력
+    print("[PLANE] model (a,b,c,d):", model)
 
 if __name__ == "__main__":
     main()
