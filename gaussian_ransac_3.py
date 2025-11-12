@@ -1,16 +1,23 @@
-# 평면에 해당하는 가우시안을 output으로
+# input : 바닥만 있는 .ply, output : 추정된 평면의 촤표
 import numpy as np
 from pathlib import Path
 import open3d as o3d
 from plyfile import PlyData, PlyElement
+import argparse, os, sys
+from pathlib import Path
 
 import time
 
 start = time.perf_counter()
 
-CSV_PATH   = Path("../SegAnyGAussians/output/db0a2cc5-9/point_cloud/iteration_30000/gaussian_floor_prob.csv")   # 네가 만든 CSV
-PLY_PATH   = Path("../SegAnyGAussians/output/db0a2cc5-9/point_cloud/iteration_30000/scene_point_cloud.ply")     # 원본 가우시안 PLY
-OUT_DIR    = Path("output/gaussian")
+# python gaussan_ransac_3.py -d output/oseok4(gaussian model)
+parser = argparse.ArgumentParser(description="평면 추정")
+parser.add_argument("-d", "--data", required=True, help="Gaussian Model")
+args = parser.parse_args()
+
+PLY_PATH   = os.path.join(args.data, "floor_data/floor.ply")
+OUT_DIR = Path(args.data) / "floor_data"
+
 THRESHOLD  = 0.5                                   # floor_prob 임계
 
 # RANSAC 파라미터 (네 코드와 동일/유사)
@@ -18,28 +25,33 @@ DIST_TH     = 0.03
 RANSAC_N    = 3
 N_ITER      = 2000
 MIN_INLIER_RATIO = 0.002
-UP_AXIS     = np.array([0, 1, 0], float)  # z-up이면 [0,0,1]
-ANGLE_TOL   = 5.0
+UP_AXIS     = np.array([0, 1, 0], float)  # z-up이면 [0,0,1], 월드 업 축
+ANGLE_TOL   = 5.0 # 이 각도 이하는 평면으로 인정
 
+# 벡터 정규화?
 def _unit(v):
     n = np.linalg.norm(v); return v/n if n>0 else v
 
+# 법선 n과 기준축 axis 사이의 끼인 각 계산
 def _angle_deg_to_axis(n, axis):
     n = _unit(np.asarray(n,float)); axis = _unit(np.asarray(axis,float))
     c = float(np.clip(abs(np.dot(n, axis)), -1.0, 1.0))
     return float(np.degrees(np.arccos(c)))
 
+# ply 읽기
 def read_xyz_and_vertex(p):
     ply = PlyData.read(p)
     v = ply['vertex']
     xyz = np.column_stack([v['x'], v['y'], v['z']]).astype(np.float32)
     return xyz, v.data, ply
 
+# 원본 ply 형식을 유지하여 ply 파일 만들기
 def write_subset(path, ply_full, v_subset):
     out = PlyData([PlyElement.describe(v_subset, 'vertex')], text=ply_full.text, byte_order=ply_full.byte_order)
     path.parent.mkdir(parents=True, exist_ok=True)
     out.write(path.as_posix())
 
+# 평면 추정
 def ransac_floor(xyz):
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(xyz.astype(np.float64))
@@ -60,36 +72,93 @@ def ransac_floor(xyz):
     best = max(floor_cands or planes, key=lambda x: len(x[1]))
     return np.unique(best[1]), best[0]
 
+# 평면 꼭짓점 계산
+def compute_plane_corners(points, normal):
+    """
+    points: 평면 위 점들 (Nx3)
+    normal: 단위 법선 벡터 (3,)
+    return: corners (4x3)
+    """
+    # 1. 법선에 수직인 두 축(u, v) 계산
+    normal = normal / np.linalg.norm(normal)
+    # u축: 법선과 다른 임의 벡터의 외적
+    ref = np.array([1, 0, 0]) if abs(normal[0]) < 0.9 else np.array([0, 1, 0])
+    u = np.cross(normal, ref)
+    u /= np.linalg.norm(u)
+    v = np.cross(normal, u)
+    v /= np.linalg.norm(v)
+
+    # 2. 점들을 (u,v) 평면 좌표계로 변환
+    proj_u = np.dot(points, u)
+    proj_v = np.dot(points, v)
+
+    # 3. 2D bounding box 계산
+    umin, umax = proj_u.min(), proj_u.max()
+    vmin, vmax = proj_v.min(), proj_v.max()
+
+    # 4. 꼭짓점을 3D로 복원
+    corners = [
+        u * umin + v * vmin,
+        u * umax + v * vmin,
+        u * umax + v * vmax,
+        u * umin + v * vmax
+    ]
+    # 중심점(원점 기준) 보정
+    center = points.mean(axis=0)
+    corners = [center + c for c in corners]
+
+    return np.array(corners)
+
+
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # 1) CSV에서 floor 인덱스 뽑기
-    arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
-    if arr.ndim == 1: arr = arr[None,:]
-    idx = arr[:,0].astype(int); prob = arr[:,1].astype(float)
-    sel = idx[prob >= THRESHOLD]
+    # CSV에서 floor 인덱스 뽑기
+    # arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
+    # if arr.ndim == 1: arr = arr[None,:]
+    # idx = arr[:,0].astype(int); prob = arr[:,1].astype(float)
+    # sel = idx[prob >= THRESHOLD]
 
-    # 2) PLY 로드 → floor 서브셋 만들기
+    # PLY 로드 → floor 서브셋 만들기
     xyz, vtable, ply_full = read_xyz_and_vertex(PLY_PATH)
-    if sel.size == 0:
-        print("[WARN] no floor candidates at this threshold"); return
-    v_floor = vtable[sel]
-    floor_only_path = OUT_DIR / f"floor_candidates_thr{THRESHOLD:.2f}.ply"
-    write_subset(floor_only_path, ply_full, v_floor)
-    print("[SAVE] candidates:", floor_only_path, "(N=", len(v_floor), ")")
+    N = len(xyz)
+    print(f"[LOAD] floor.ply: {N} points")
 
-    # 3) RANSAC (floor-only 후보에 대해서 실행 → 훨씬 빨라짐)
-    xyz_floor = xyz[sel]
-    inliers, model = ransac_floor(xyz_floor)
+    # RANSAC (floor-only 후보에 대해서 실행 → 훨씬 빨라짐)
+    inliers, model = ransac_floor(xyz)
     if inliers is None or inliers.size == 0:
         print("[WARN] RANSAC found no plane"); return
 
-    # 4) 최종 평면 인라이어만 저장
-    final_idx_in_full = sel[inliers]  # 원본 인덱스 공간으로 변환
-    final_subset = vtable[final_idx_in_full]
-    out_ply = OUT_DIR / "floor_plane_inliers.ply"
-    write_subset(out_ply, ply_full, final_subset)
-    print("[DONE] floor inliers:", len(final_subset), "->", out_ply)
-    print("[PLANE] model (a,b,c,d):", model)
+    # 평면 정보
+    a, b, c, d = model
+    n = np.array([a, b, c], dtype=float)
+    n_norm = np.linalg.norm(n)
+    n_unit = n / n_norm # 법선
+    distance = -d / n_norm  # 원점과 평면의 거리
+
+    print("model (a,b,c,d):", model)
+    print("normal (x, y, z):", n_unit.tolist())
+    print("distance :", float(distance))
+
+    # 평면에 속하는 스플랫 점 (inlier) 추출
+    floor_points = xyz[inliers]
+
+    # x,z축 기준으로 최대 최소점 계산
+    x_min, y_min, z_min = floor_points.min(axis=0)
+    x_max, y_max, z_max = floor_points.max(axis=0)
+
+    print(f"[BOUNDING BOX] x_min={x_min:.3f}, x_max={x_max:.3f}, "
+          f"z_min={z_min:.3f}, z_max={z_max:.3f}")
+
+    # 꼭짓점 계산 (x,z축 평면 상 사각형)
+    corners = np.array([
+        [x_min, (y_min + y_max) / 2, z_min],
+        [x_max, (y_min + y_max) / 2, z_min],
+        [x_max, (y_min + y_max) / 2, z_max],
+        [x_min, (y_min + y_max) / 2, z_max],
+    ])
+    print("[CORNERS]")
+    for i, c in enumerate(corners):
+        print(f"corner_{i+1}: {c.tolist()}")
 
 if __name__ == "__main__":
     main()
