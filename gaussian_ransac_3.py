@@ -20,7 +20,7 @@ FLOOR_PATH   = os.path.join(args.data, "floor_data/floor.ply")
 GAUSSIAN_PATH   = os.path.join(args.data, "point_cloud/iteration_30000/point_cloud.ply")
 OUT_DIR = Path(args.data) / "floor_data"
 
-THRESHOLD  = 0.5                                   # floor_prob 임계
+THRESHOLD  = 0.3                                   # floor_prob 임계
 
 # RANSAC 파라미터 (네 코드와 동일/유사)
 DIST_TH     = 0.03
