@@ -1,4 +1,4 @@
-# input : 바닥만 있는 .ply, output : 추정된 평면의 촤표
+# input : 바닥만 있는 .ply, output : 추정된 평면의 촤표, 바닥이 평평한 전체 가우시안 모델
 import numpy as np
 from pathlib import Path
 import open3d as o3d
@@ -15,7 +15,9 @@ parser = argparse.ArgumentParser(description="평면 추정")
 parser.add_argument("-d", "--data", required=True, help="Gaussian Model")
 args = parser.parse_args()
 
-PLY_PATH   = os.path.join(args.data, "floor_data/floor.ply")
+CSV_PATH   = os.path.join(args.data, "floor_data/gaussian_floor_prob.csv")
+FLOOR_PATH   = os.path.join(args.data, "floor_data/floor.ply")
+GAUSSIAN_PATH   = os.path.join(args.data, "point_cloud/iteration_30000/point_cloud.ply")
 OUT_DIR = Path(args.data) / "floor_data"
 
 THRESHOLD  = 0.5                                   # floor_prob 임계
@@ -112,21 +114,14 @@ def compute_plane_corners(points, normal):
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    # CSV에서 floor 인덱스 뽑기
-    # arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
-    # if arr.ndim == 1: arr = arr[None,:]
-    # idx = arr[:,0].astype(int); prob = arr[:,1].astype(float)
-    # sel = idx[prob >= THRESHOLD]
 
     # PLY 로드 → floor 서브셋 만들기
-    xyz, vtable, ply_full = read_xyz_and_vertex(PLY_PATH)
-    N = len(xyz)
+    floor_xyz, floor_vtable, floor_ply = read_xyz_and_vertex(FLOOR_PATH)
+    N = len(floor_xyz)
     print(f"[LOAD] floor.ply: {N} points")
 
-    # RANSAC (floor-only 후보에 대해서 실행 → 훨씬 빨라짐)
-    inliers, model = ransac_floor(xyz)
-    if inliers is None or inliers.size == 0:
-        print("[WARN] RANSAC found no plane"); return
+    # RANSAC
+    inliers, model = ransac_floor(floor_xyz)
 
     # 평면 정보
     a, b, c, d = model
@@ -140,7 +135,7 @@ def main():
     print("distance :", float(distance))
 
     # 평면에 속하는 스플랫 점 (inlier) 추출
-    floor_points = xyz[inliers]
+    floor_points = floor_xyz[inliers]
 
     # x,z축 기준으로 최대 최소점 계산
     x_min, y_min, z_min = floor_points.min(axis=0)
@@ -159,6 +154,42 @@ def main():
     print("[CORNERS]")
     for i, c in enumerate(corners):
         print(f"corner_{i+1}: {c.tolist()}")
+
+    ### 전체 모델
+    # CSV에서 floor 인덱스 뽑기
+    arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
+    if arr.ndim == 1: arr = arr[None,:]
+    idx = arr[:,0].astype(int); prob = arr[:,1].astype(float)
+    sel = idx[prob >= THRESHOLD]
+
+    # PLY 로드 → floor 서브셋 만들기
+    all_xyz, all_vtable, all_ply = read_xyz_and_vertex(GAUSSIAN_PATH)
+
+    if np.dot(n, UP_AXIS) < 0:
+        n = -n
+        d = -d
+
+    fulls_floor_xyz = all_xyz[sel]
+    splats = fulls_floor_xyz @ n + d
+    above_mask = splats < 0
+
+    xyz_new = all_xyz.copy()
+    n_unit = n / np.linalg.norm(n)
+
+    for i, idx in enumerate(sel[np.where(above_mask)[0]]):
+        dist = np.dot(n_unit, all_xyz[idx]) + d
+        xyz_new[idx] = all_xyz[idx] - n_unit * dist
+
+    # 새로운 좌표
+    v_new = all_vtable.copy()
+    v_new['x'] = xyz_new[:, 0]
+    v_new['y'] = xyz_new[:, 1]
+    v_new['z'] = xyz_new[:, 2]
+
+    out_ply = OUT_DIR / "projection.ply"
+    write_subset(out_ply, all_ply, v_new)
+
+    print(f"[DONE] saved projected scene to {out_ply}")
 
 if __name__ == "__main__":
     main()
