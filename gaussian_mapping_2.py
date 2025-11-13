@@ -28,7 +28,7 @@ MASK_ROOT      = f"output/{colmap_folder}/masks"                   # 마스크 �
 GAUSS_PLY_IN   = os.path.join(args.gaussian, "point_cloud/iteration_30000/scene_point_cloud.ply")
 
 # 표결 파라미터
-FLOOR_THR        = 0.4    # floor_prob >= THR → 바닥으로 간주(마스크 목록 저장용)
+FLOOR_THR        = 0.3    # floor_prob >= THR → 바닥으로 간주(마스크 목록 저장용)
 # ==========================
 
 # ---- read_write_model.py 찾기 (COLMAP) ----
