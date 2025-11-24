@@ -1,3 +1,9 @@
+# floor segmentation
+# input : colmap에서 사용된 multi-view images
+# colmap의 images 파일
+
+# output : Binary images
+
 from ultralytics import YOLO
 import cv2
 import numpy as np
@@ -19,7 +25,7 @@ args = parser.parse_args()
 colmap_folder = os.path.basename(os.path.normpath(args.data))   # colmap 폴더 이름을 가져옴
 image_dir = os.path.join(args.data, "images")   # colmap에서 선택된 이미지 path
 output_dir = os.path.join("output", colmap_folder)  # colmap 폴더의 이름과 같은 output 폴더
-model_path = "../yolo11/best.pt"
+model_path = "../yolo11/best.pt" # yolo11 사용
 
 
 # 출력 디렉토리 생성

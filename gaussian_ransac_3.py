@@ -1,4 +1,6 @@
-# input : 바닥만 있는 .ply, output : 추정된 평면의 촤표, 바닥이 평평한 전체 가우시안 모델
+# input : 바닥만 있는 .ply, gaussian_floor_prob.csv
+
+# output : 추정된 평면의 촤표, 바닥이 평평한 전체 가우시안 모델
 import numpy as np
 from pathlib import Path
 import open3d as o3d
@@ -20,9 +22,9 @@ FLOOR_PATH   = os.path.join(args.data, "floor_data/floor.ply")
 GAUSSIAN_PATH   = os.path.join(args.data, "point_cloud/iteration_30000/point_cloud.ply")
 OUT_DIR = Path(args.data) / "floor_data"
 
-THRESHOLD  = 0.3                                   # floor_prob 임계
+THRESHOLD  = 0.2 # floor_prob Threshold
 
-# RANSAC 파라미터 (네 코드와 동일/유사)
+# RANSAC 파라미터
 DIST_TH     = 0.03
 RANSAC_N    = 3
 N_ITER      = 2000
@@ -74,48 +76,57 @@ def ransac_floor(xyz):
     best = max(floor_cands or planes, key=lambda x: len(x[1]))
     return np.unique(best[1]), best[0]
 
-# 평면 꼭짓점 계산
-def compute_plane_corners(points, normal):
-    """
-    points: 평면 위 점들 (Nx3)
-    normal: 단위 법선 벡터 (3,)
-    return: corners (4x3)
-    """
-    # 1. 법선에 수직인 두 축(u, v) 계산
-    normal = normal / np.linalg.norm(normal)
-    # u축: 법선과 다른 임의 벡터의 외적
-    ref = np.array([1, 0, 0]) if abs(normal[0]) < 0.9 else np.array([0, 1, 0])
-    u = np.cross(normal, ref)
+# PCA 사각형의 각 꼭짓점 -> Unity에서 쓸 거
+def compute_plane_corners_pca(xyz_inliers, model, expand_ratio=1.1):
+    n = model[:3] / np.linalg.norm(model[:3])
+    d = float(model[3])
+    center = xyz_inliers.mean(axis=0)
+
+    # 평면에 투영
+    xyz_proj = xyz_inliers - (xyz_inliers @ n + d)[:, None] * n
+
+    # SVD로 평면상 주축(u,v) 계산
+    X = xyz_proj - center
+    _, _, Vt = np.linalg.svd(X, full_matrices=False)
+    u = Vt[0]; v = Vt[1]
     u /= np.linalg.norm(u)
-    v = np.cross(normal, u)
+    v -= (v @ u) * u
     v /= np.linalg.norm(v)
 
-    # 2. 점들을 (u,v) 평면 좌표계로 변환
-    proj_u = np.dot(points, u)
-    proj_v = np.dot(points, v)
+    # 평면상 좌표로 변환
+    uv = np.stack([X @ u, X @ v], axis=1)
+    min_u, min_v = uv.min(axis=0)
+    max_u, max_v = uv.max(axis=0)
 
-    # 3. 2D bounding box 계산
-    umin, umax = proj_u.min(), proj_u.max()
-    vmin, vmax = proj_v.min(), proj_v.max()
+    du = (max_u - min_u) * expand_ratio
+    dv = (max_v - min_v) * expand_ratio
+    cu = (max_u + min_u) * 0.5
+    cv = (max_v + min_v) * 0.5
 
-    # 4. 꼭짓점을 3D로 복원
-    corners = [
-        u * umin + v * vmin,
-        u * umax + v * vmin,
-        u * umax + v * vmax,
-        u * umin + v * vmax
-    ]
-    # 중심점(원점 기준) 보정
-    center = points.mean(axis=0)
-    corners = [center + c for c in corners]
+    min_u, max_u = cu - du * 0.5, cu + du * 0.5
+    min_v, max_v = cv - dv * 0.5, cv + dv * 0.5
 
-    return np.array(corners)
+    # 사각형 생성
+    corners_local = np.array([
+        [min_u, min_v],
+        [max_u, min_v],
+        [max_u, max_v],
+        [min_u, max_v],
+    ], dtype=np.float64)
+    corners_world = center + corners_local[:, 0:1] * u + corners_local[:, 1:1+1] * v
 
+    # CCW 정렬
+    rel = corners_world - corners_world.mean(axis=0)
+    angles = np.arctan2(rel @ v, rel @ u)
+    order = np.argsort(angles)
+    corners_world = corners_world[order]
+
+    return corners_world
 
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # PLY 로드 → floor 서브셋 만들기
+    # PLY 로드 -> floor 서브셋
     floor_xyz, floor_vtable, floor_ply = read_xyz_and_vertex(FLOOR_PATH)
     N = len(floor_xyz)
     print(f"[LOAD] floor.ply: {N} points")
@@ -130,39 +141,23 @@ def main():
     n_unit = n / n_norm # 법선
     distance = -d / n_norm  # 원점과 평면의 거리
 
-    print("model (a,b,c,d):", model)
-    print("normal (x, y, z):", n_unit.tolist())
-    print("distance :", float(distance))
-
-    # 평면에 속하는 스플랫 점 (inlier) 추출
+    # 평면에 속하는 스플랫 점
     floor_points = floor_xyz[inliers]
 
-    # x,z축 기준으로 최대 최소점 계산
-    x_min, y_min, z_min = floor_points.min(axis=0)
-    x_max, y_max, z_max = floor_points.max(axis=0)
-
-    print(f"[BOUNDING BOX] x_min={x_min:.3f}, x_max={x_max:.3f}, "
-          f"z_min={z_min:.3f}, z_max={z_max:.3f}")
-
-    # 꼭짓점 계산 (x,z축 평면 상 사각형)
-    corners = np.array([
-        [x_min, (y_min + y_max) / 2, z_min],
-        [x_max, (y_min + y_max) / 2, z_min],
-        [x_max, (y_min + y_max) / 2, z_max],
-        [x_min, (y_min + y_max) / 2, z_max],
-    ])
-    print("[CORNERS]")
-    for i, c in enumerate(corners):
-        print(f"corner_{i+1}: {c.tolist()}")
+    # 추정된 평면의 각 꼭짓점
+    corners = compute_plane_corners_pca(floor_xyz[inliers], model)
+    print("Corners : ", corners)
 
     ### 전체 모델
     # CSV에서 floor 인덱스 뽑기
     arr = np.loadtxt(CSV_PATH, delimiter=",", skiprows=1)
-    if arr.ndim == 1: arr = arr[None,:]
-    idx = arr[:,0].astype(int); prob = arr[:,1].astype(float)
+    if arr.ndim == 1: 
+        arr = arr[None,:]
+    idx = arr[:,0].astype(int)
+    prob = arr[:,1].astype(float)
     sel = idx[prob >= THRESHOLD]
 
-    # PLY 로드 → floor 서브셋 만들기
+    # PLY 로드 -> 전체 모델 서브셋
     all_xyz, all_vtable, all_ply = read_xyz_and_vertex(GAUSSIAN_PATH)
 
     if np.dot(n, UP_AXIS) < 0:
@@ -180,7 +175,7 @@ def main():
         dist = np.dot(n_unit, all_xyz[idx]) + d
         xyz_new[idx] = all_xyz[idx] - n_unit * dist
 
-    # 새로운 좌표
+    # 정사영된 좌표
     v_new = all_vtable.copy()
     v_new['x'] = xyz_new[:, 0]
     v_new['y'] = xyz_new[:, 1]
