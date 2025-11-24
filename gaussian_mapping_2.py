@@ -1,4 +1,6 @@
-# 바닥에 해당하는 csv파일, 바닥 ply파일, 바닥이 아닌 ply파일
+# input : colmap 파일의 sparse/0/cameras.bin, sparse/0/images.bin, binary images
+
+#output : 바닥에 해당하는 csv파일, 바닥 ply파일, 바닥이 아닌 ply파일
 
 import os, sys, glob, time
 import numpy as np
@@ -11,7 +13,6 @@ import time
 
 start = time.perf_counter()
 
-# ========= 설정 =========
 # -d colmap path
 # -g gaussian path
 # ex) python gaussian_mapping.py -d data/oseok3/ -g output/db0a2cc5-9
@@ -21,17 +22,15 @@ parser.add_argument("-g", "--gaussian", required=True, help="Gaussian Splatting 
 args = parser.parse_args()
 
 SPARSE_DIR     = os.path.join(args.data, "sparse/0") # cameras.bin, images.bin
-IMAGE_ROOT     = os.path.join(args.data, "images") # 원본 이미지 폴더
+IMAGE_ROOT     = os.path.join(args.data, "images") # 이미지
 colmap_folder = os.path.basename(os.path.normpath(args.data))
-MASK_ROOT      = f"output/{colmap_folder}/masks"                   # 마스크 루트(IMG_0001/* or IMG_0001.png)
+MASK_ROOT      = f"output/{colmap_folder}/masks"   # 바이너리 이미지
 
 GAUSS_PLY_IN   = os.path.join(args.gaussian, "point_cloud/iteration_30000/point_cloud.ply")
 
-# 표결 파라미터
-FLOOR_THR        = 0.2    # floor_prob >= THR → 바닥으로 간주(마스크 목록 저장용)
-# ==========================
+FLOOR_THR        = 0.2    # Threshold
 
-# ---- read_write_model.py 찾기 (COLMAP) ----
+# read_write_model.py 찾기 (COLMAP) -> colmap file을 읽기 위함
 script_dir = os.path.dirname(os.path.abspath(__file__))
 CANDIDATES = [
     os.path.join(os.environ.get("CONDA_PREFIX",""), "share/colmap/scripts/python"),
@@ -57,8 +56,7 @@ if rw is None:
     print("[ERR] read_write_model.py not found. Put it in ./tools or $CONDA_PREFIX/share/colmap/scripts/python")
     sys.exit(1)
 
-# ---- 마스크 로드 (파일/폴더 + 합집합) ----
-# 이진화를 또 한다?
+# 바이너리 이미지 로드
 def _load_binary_mask(p):
     g = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
     if g is None: return None
@@ -73,7 +71,6 @@ def _resize_nearest(m, HW):
 def get_union_mask(img_name, mask_root, target_hw, cache):
     H,W = target_hw
     stem, _ = os.path.splitext(img_name)
-    # 1) 단일 파일
     for cand in [img_name, stem+"_mask.png", stem+"_mask.jpg", stem+"_mask.jpeg"]:
         p = os.path.join(mask_root, cand)
         if os.path.exists(p):
@@ -81,24 +78,9 @@ def get_union_mask(img_name, mask_root, target_hw, cache):
             if m is None:
                 m = _load_binary_mask(p); cache[p]=m
             return _resize_nearest(m, (H,W)) if m is not None else None
-    # # 2) 폴더 합집합 -> 필요없을듯
-    # folder = os.path.join(mask_root, stem)
-    # if os.path.isdir(folder):
-    #     union=None
-    #     for fp in sorted(glob.glob(os.path.join(folder, "*"))):
-    #         ext = os.path.splitext(fp)[1].lower()
-    #         if ext not in [".png",".jpg",".jpeg",".bmp",".tif",".tiff"]:
-    #             continue
-    #         m = cache.get(fp)
-    #         if m is None:
-    #             m = _load_binary_mask(fp); cache[fp]=m
-    #         if m is None: continue
-    #         m = _resize_nearest(m, (H,W))
-    #         union = m if union is None else (union | m)
-    #     if union is not None: return union
     return None
 
-# ---- 카메라 모델 투영 ----
+# 카메라 모델 투영
 def qvec2rotmat(q):
     w,x,y,z = q
     return np.array([
@@ -106,6 +88,7 @@ def qvec2rotmat(q):
         [2*x*y+2*w*z,   1-2*x*x-2*z*z, 2*y*z-2*w*x],
         [2*x*z-2*w*y,   2*y*z+2*w*x,   1-2*x*x-2*y*y]], dtype=float)
 
+# 정사영
 def project_point(Xw, R, t, cam):
     Xc = R @ Xw + t
     if Xc[2] <= 0: return None  # 뒤쪽
@@ -144,9 +127,9 @@ def write_subset(path, ply_full, v_subset):
     out.write(path.as_posix())
 
 
-# ---- 메인 함수 ----
+# 메인 함수
 def main():
-    # 0) COLMAP 모델/이미지 로드
+    # COLMAP 로드
     cams   = rw.read_cameras_binary(os.path.join(SPARSE_DIR, "cameras.bin"))
     images = rw.read_images_binary( os.path.join(SPARSE_DIR, "images.bin"))
 
@@ -173,14 +156,14 @@ def main():
     if not views:
         raise RuntimeError("no views with masks")
 
-    # 1) 가우시안 PLY 로드 → centers
+    # 가우시안 PLY 로드
     ply = PlyData.read(GAUSS_PLY_IN)
     v = ply['vertex']
     G = np.stack([v['x'], v['y'], v['z']], axis=1).astype(np.float64)
     N = len(G)
     print(f"[G] gaussians: {N}")
 
-    # 2) 각 가우시안에 대해 마스크 표결
+    # 각 가우시안에 대해 마스크 표결
     floor_prob = np.zeros(N, float)
 
     for i in range(N):
@@ -195,29 +178,25 @@ def main():
                 votes.append(1 if m[vp,u]>0 else 0)
         floor_prob[i] = np.mean(votes) if votes else 0.0
 
-    # 3) 저장 -> output/oseok4/floor_data 폴더에 저장
+    # 저장 -> output/oseok4/floor_data 폴더에 저장
     out_dir = os.path.join(args.gaussian, "floor_data")
     os.makedirs(out_dir, exist_ok=True)
 
     idxs = np.arange(N, dtype=int)
+    # 바닥 표결 결과 저장
     prob_csv = os.path.join(out_dir, "gaussian_floor_prob.csv")
     np.savetxt(prob_csv, np.c_[idxs, floor_prob],
                delimiter=",", header="index,floor_prob", comments="", fmt=["%d","%.6f"])
     print(f"[SAVE] floor prob -> {prob_csv}")
 
-    # 필요 없는 듯
-    # mask_idx_path = os.path.join(out_dir, f"gaussian_floor_indices_thr{FLOOR_THR:.2f}.txt")
-    # sel = np.where(floor_prob >= FLOOR_THR)[0]
-    # np.savetxt(mask_idx_path, sel, fmt="%d")
-    # print(f"[SAVE] floor indices (thr={FLOOR_THR}) -> {mask_idx_path}")
-
-    # 4) PLY 분할 저장
+    # PLY 분할 저장
     floor_idxs = np.where(floor_prob >= FLOOR_THR)[0]
     nonfloor_idxs = np.where(floor_prob < FLOOR_THR)[0]
 
     # 원본 PLY 로드
     xyz, vtable, ply_full = read_xyz_and_vertex(GAUSS_PLY_IN)
 
+    # 바닥인 .ply와 바닥이 아닌 .ply
     v_floor = vtable[floor_idxs]
     v_nonfloor = vtable[nonfloor_idxs]
 

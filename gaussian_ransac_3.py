@@ -1,4 +1,6 @@
-# input : 바닥만 있는 .ply, output : 추정된 평면의 촤표, 바닥이 평평한 전체 가우시안 모델
+# input : 바닥만 있는 .ply, gaussian_floor_prob.csv
+
+# output : 추정된 평면의 촤표, 바닥이 평평한 전체 가우시안 모델
 import numpy as np
 from pathlib import Path
 import open3d as o3d
@@ -20,9 +22,9 @@ FLOOR_PATH   = os.path.join(args.data, "floor_data/floor.ply")
 GAUSSIAN_PATH   = os.path.join(args.data, "point_cloud/iteration_30000/point_cloud.ply")
 OUT_DIR = Path(args.data) / "floor_data"
 
-THRESHOLD  = 0.3                                # floor_prob 임계
+THRESHOLD  = 0.2 # floor_prob Threshold
 
-# RANSAC 파라미터 (네 코드와 동일/유사)
+# RANSAC 파라미터
 DIST_TH     = 0.03
 RANSAC_N    = 3
 N_ITER      = 2000
@@ -74,8 +76,8 @@ def ransac_floor(xyz):
     best = max(floor_cands or planes, key=lambda x: len(x[1]))
     return np.unique(best[1]), best[0]
 
+# PCA 사각형의 각 꼭짓점 -> Unity에서 쓸 거
 def compute_plane_corners_pca(xyz_inliers, model, expand_ratio=1.1):
-    """PCA 기반 평면 사각형 꼭짓점 계산"""
     n = model[:3] / np.linalg.norm(model[:3])
     d = float(model[3])
     center = xyz_inliers.mean(axis=0)
@@ -124,7 +126,7 @@ def compute_plane_corners_pca(xyz_inliers, model, expand_ratio=1.1):
 def main():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    # PLY 로드 → floor 서브셋 만들기
+    # PLY 로드 -> floor 서브셋
     floor_xyz, floor_vtable, floor_ply = read_xyz_and_vertex(FLOOR_PATH)
     N = len(floor_xyz)
     print(f"[LOAD] floor.ply: {N} points")
@@ -139,19 +141,11 @@ def main():
     n_unit = n / n_norm # 법선
     distance = -d / n_norm  # 원점과 평면의 거리
 
-    # PLY 로드 → floor 서브셋 만들기
-    floor_xyz, floor_vtable, floor_ply = read_xyz_and_vertex(FLOOR_PATH)
-    N = len(floor_xyz)
-    print(f"[LOAD] floor.ply: {N} points")
-
-    # RANSAC
-    inliers, model = ransac_floor(floor_xyz)
-
-    # 평면에 속하는 스플랫 점 (inlier) 추출
+    # 평면에 속하는 스플랫 점
     floor_points = floor_xyz[inliers]
 
+    # 추정된 평면의 각 꼭짓점
     corners = compute_plane_corners_pca(floor_xyz[inliers], model)
-
     print("Corners : ", corners)
 
     ### 전체 모델
@@ -163,7 +157,7 @@ def main():
     prob = arr[:,1].astype(float)
     sel = idx[prob >= THRESHOLD]
 
-    # PLY 로드 → floor 서브셋 만들기
+    # PLY 로드 -> 전체 모델 서브셋
     all_xyz, all_vtable, all_ply = read_xyz_and_vertex(GAUSSIAN_PATH)
 
     if np.dot(n, UP_AXIS) < 0:
@@ -181,7 +175,7 @@ def main():
         dist = np.dot(n_unit, all_xyz[idx]) + d
         xyz_new[idx] = all_xyz[idx] - n_unit * dist
 
-    # 새로운 좌표
+    # 정사영된 좌표
     v_new = all_vtable.copy()
     v_new['x'] = xyz_new[:, 0]
     v_new['y'] = xyz_new[:, 1]
