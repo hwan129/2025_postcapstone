@@ -70,23 +70,14 @@ print(f"Loaded {vertex_count} vertices with {prop_count} properties per vertex."
 # nonfloor_data = data[mask == False] 
 # floor_data = data[mask == True] 
 # Load segmentation mask
-mask = torch.load(MASK_PATH).view(-1).cpu().numpy()
+mask = torch.load(MASK_PATH).view(-1).cpu().numpy().astype(bool)
+assert len(mask) == vertex_count, "mask length != vertex count"
 
-# 1) 반전 여부 체크 (비율 이상하면 자동 뒤집기)
-true_count = np.sum(mask == True)
-false_count = np.sum(mask == False)
+print("mask True (floor):", np.sum(mask), "mask False:", np.sum(~mask))
 
-if true_count < false_count * 0.1:   # floor가 전체의 10% 미만이면 반전
-    print("WARNING: mask too small → flipping mask.")
-    mask = ~mask
+nonfloor_data = data[~mask]
+floor_data    = data[mask]
 
-# 2) dilation으로 floor 확장
-from scipy.ndimage import binary_dilation
-mask = binary_dilation(mask, iterations=3).astype(bool)
-
-# 이제 floor_data, nonfloor_data 다시 계산
-nonfloor_data = data[mask == False]
-floor_data = data[mask == True]
 
 
 # 비바닥.ply 저장
@@ -236,28 +227,30 @@ print(f"Saved plane corners → {PLANE_CORNERS_TXT}")
 # 3) 전체 가우시안에서 '바닥으로 분류된 포인트'만 평면으로 정사영
 floor_idx = np.where(mask == True)[0]
 
-# 전체 좌표 복사
 xyz_new = all_xyz.copy()
 
 # 평면: n·x + d = 0
 n_norm = np.linalg.norm(n)
 n_unit = n / n_norm
 
-# 각 바닥 포인트의 signed distance (거리 방향은 n_unit)
-# dist = (n·p + d) / ||n||
 floor_pts = all_xyz[floor_idx]
-signed_dists = (floor_pts @ n + d) / n_norm  # shape: (N_floor,)
+signed_dists = (floor_pts @ n + d) / n_norm  # >0: n 방향 위, <0: 아래
 
-# projection: p_proj = p - dist * n_unit
-signed_dists = (floor_pts @ n + d) / n_norm
-
-# 평면 위(+) 에 있는 애들만 projection
+# 평면 '위'에 있는 floor만 projection
 above_mask = signed_dists > 0
+proj_idx   = floor_idx[above_mask]
+dists_above = signed_dists[above_mask]
 
-proj_idx = floor_idx[above_mask]
+xyz_new[proj_idx] = all_xyz[proj_idx] - dists_above[:, None] * n_unit[None, :]
 
-xyz_new[proj_idx] = all_xyz[proj_idx] - signed_dists[above_mask][:, None] * n_unit[None, :]
+# 4) 정사영된 좌표로 PLY 저장
+projected_data = data.copy()
+projected_data[:, 0] = xyz_new[:, 0]
+projected_data[:, 1] = xyz_new[:, 1]
+projected_data[:, 2] = xyz_new[:, 2]
 
+save_ply_binary(PROJECTION_PLY, header, projected_data)
+print(f"Saved projected gaussian splatting PLY → {PROJECTION_PLY}")
 
 # 4) 정사영된 좌표로 PLY 저장
 projected_data = data.copy()
